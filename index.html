@@ -510,6 +510,13 @@
         <p style="margin-top:4px;font-size:.72rem">.csv · .tsv · .xlsx · .xls · .txt</p>
       </div>
       <div id="fileName" style="margin-top:8px;font-size:.78rem;color:var(--sub);font-family:'DM Mono',monospace;"></div>
+      <!-- Sheet picker: only shown for XLSX files -->
+      <div id="sheetPickerWrap" style="display:none;margin-top:10px">
+        <div class="section-label" style="margin-bottom:6px">Sheet to Read</div>
+        <select id="sheetSelect" style="width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:var(--radius);font-family:'Sora',sans-serif;font-size:.85rem;outline:none;appearance:none;background-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%237a80a0' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E\");background-repeat:no-repeat;background-position:right 12px center;cursor:pointer;">
+        </select>
+        <div style="margin-top:5px;font-size:.7rem;color:var(--sub);font-family:'DM Mono',monospace;">💡 Sheet auto-matched to selected topic. Change if needed.</div>
+      </div>
     </div>
 
     <!-- Manual mode -->
@@ -763,11 +770,34 @@ function handleFile(file) {
   uploadedIsXLSX = isXLSX;
   const reader = new FileReader();
   if (isXLSX) {
-    reader.onload = ev => { uploadedXLSX = ev.target.result; uploadedText = ''; };
+    reader.onload = ev => {
+      uploadedXLSX = ev.target.result;
+      uploadedText = '';
+      // Read sheet names and populate picker
+      const wb = XLSX.read(uploadedXLSX, { type: 'array', bookSheets: true });
+      const sheetNames = wb.SheetNames;
+      const sel = document.getElementById('sheetSelect');
+      sel.innerHTML = sheetNames.map(n => `<option value="${n}">${n}</option>`).join('');
+      // Auto-match: pick sheet whose name best matches the selected topic
+      const topic = norm(document.getElementById('topicSelect').value);
+      if (topic) {
+        let bestIdx = 0, bestScore = 0;
+        sheetNames.forEach((name, i) => {
+          const nName = norm(name);
+          const score = nName === topic ? 100
+            : nName.includes(topic) || topic.includes(nName) ? 50
+            : [...topic].filter(c => nName.includes(c)).length;
+          if (score > bestScore) { bestScore = score; bestIdx = i; }
+        });
+        sel.selectedIndex = bestIdx;
+      }
+      document.getElementById('sheetPickerWrap').style.display = 'block';
+    };
     reader.readAsArrayBuffer(file);
   } else {
     reader.onload = ev => { uploadedText = ev.target.result; uploadedXLSX = null; };
     reader.readAsText(file);
+    document.getElementById('sheetPickerWrap').style.display = 'none';
   }
 }
 
@@ -786,9 +816,11 @@ dz.addEventListener('drop', e => {
 // ══════════════════════════════════════════════════════════════════
 function parseXLSX(arrayBuffer) {
   const workbook  = XLSX.read(arrayBuffer, { type: 'array' });
-  // Use first sheet
-  const sheetName = workbook.SheetNames[0];
+  // Use the sheet selected by the user (auto-matched to topic)
+  const selEl     = document.getElementById('sheetSelect');
+  const sheetName = (selEl && selEl.value) ? selEl.value : workbook.SheetNames[0];
   const sheet     = workbook.Sheets[sheetName];
+  if (!sheet) return null;
   // Convert to array of arrays
   const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
   if (data.length < 2) return null;
