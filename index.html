@@ -502,12 +502,12 @@
 
     <!-- Upload mode -->
     <div id="mode-upload" class="hidden">
-      <div class="section-label">Upload CSV / TSV</div>
+      <div class="section-label">Upload File</div>
       <div class="dropzone" id="dropzone">
-        <input type="file" id="fileInput" accept=".csv,.tsv,.txt">
+        <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xls">
         <div class="dropzone-icon">📂</div>
         <p><strong>Click to browse</strong> or drag &amp; drop</p>
-        <p style="margin-top:4px;font-size:.72rem">.csv · .tsv · .txt</p>
+        <p style="margin-top:4px;font-size:.72rem">.csv · .tsv · .xlsx · .xls · .txt</p>
       </div>
       <div id="fileName" style="margin-top:8px;font-size:.78rem;color:var(--sub);font-family:'DM Mono',monospace;"></div>
     </div>
@@ -552,6 +552,7 @@
 
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
 // ══════════════════════════════════════════════════════════════════
 // PREDEFINED FALLBACKS
@@ -723,10 +724,12 @@ function getOwnFallbacks(topicKey) {
 // ══════════════════════════════════════════════════════════════════
 // UI STATE
 // ══════════════════════════════════════════════════════════════════
-let currentMode  = 'paste';
-let uploadedText = '';
+let currentMode   = 'paste';
+let uploadedText  = '';    // for CSV/TSV
+let uploadedXLSX  = null;  // for XLSX (ArrayBuffer)
+let uploadedIsXLSX = false;
 let currentFilter = 'all';
-let lastResults  = [];
+let lastResults   = [];
 
 function switchTab(mode) {
   currentMode = mode;
@@ -753,27 +756,66 @@ function addManualRow() {
 }
 
 // File upload
-document.getElementById('fileInput').addEventListener('change', e => {
-  const file = e.target.files[0];
+function handleFile(file) {
   if (!file) return;
   document.getElementById('fileName').textContent = '📄 ' + file.name;
+  const isXLSX = /\.xlsx?$/i.test(file.name);
+  uploadedIsXLSX = isXLSX;
   const reader = new FileReader();
-  reader.onload = ev => { uploadedText = ev.target.result; };
-  reader.readAsText(file);
-});
+  if (isXLSX) {
+    reader.onload = ev => { uploadedXLSX = ev.target.result; uploadedText = ''; };
+    reader.readAsArrayBuffer(file);
+  } else {
+    reader.onload = ev => { uploadedText = ev.target.result; uploadedXLSX = null; };
+    reader.readAsText(file);
+  }
+}
+
+document.getElementById('fileInput').addEventListener('change', e => handleFile(e.target.files[0]));
 
 const dz = document.getElementById('dropzone');
 dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('drag-over'); });
 dz.addEventListener('dragleave', ()  => dz.classList.remove('drag-over'));
 dz.addEventListener('drop', e => {
   e.preventDefault(); dz.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (!file) return;
-  document.getElementById('fileName').textContent = '📄 ' + file.name;
-  const reader = new FileReader();
-  reader.onload = ev => { uploadedText = ev.target.result; };
-  reader.readAsText(file);
+  handleFile(e.dataTransfer.files[0]);
 });
+
+// ══════════════════════════════════════════════════════════════════
+// XLSX PARSER
+// ══════════════════════════════════════════════════════════════════
+function parseXLSX(arrayBuffer) {
+  const workbook  = XLSX.read(arrayBuffer, { type: 'array' });
+  // Use first sheet
+  const sheetName = workbook.SheetNames[0];
+  const sheet     = workbook.Sheets[sheetName];
+  // Convert to array of arrays
+  const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+  if (data.length < 2) return null;
+
+  const headers = data[0].map(h => String(h).trim().toLowerCase());
+
+  const qOverride = norm(document.getElementById('qCol').value);
+  const aOverride = norm(document.getElementById('aCol').value);
+  const Q_KEYWORDS = ['question','prompt','query','q','input','message'];
+  const A_KEYWORDS = ['sentence','response','answer','output','reply','a','text'];
+
+  let qIdx = -1, aIdx = -1;
+  if (qOverride) qIdx = headers.findIndex(h => norm(h) === qOverride);
+  if (aOverride) aIdx = headers.findIndex(h => norm(h) === aOverride);
+  if (qIdx === -1) qIdx = headers.findIndex(h => Q_KEYWORDS.some(k => h.includes(k)));
+  if (aIdx === -1) aIdx = headers.findIndex(h => A_KEYWORDS.some(k => h.includes(k)));
+  if (qIdx === -1) qIdx = 0;
+  if (aIdx === -1) aIdx = 1;
+
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const q = String(data[i][qIdx] || '').trim();
+    const a = String(data[i][aIdx] || '').trim();
+    if (a) rows.push({ question: q, response: a });
+  }
+  return rows;
+}
 
 // ══════════════════════════════════════════════════════════════════
 // CSV PARSER
@@ -852,9 +894,15 @@ function runChecks() {
     rows = parsed;
 
   } else if (currentMode === 'upload') {
-    if (!uploadedText) { alert('Please upload a file first.'); return; }
-    const parsed = parseCSV(uploadedText);
-    if (!parsed || parsed.length === 0) { alert('Could not parse file. Check format.'); return; }
+    let parsed = null;
+    if (uploadedIsXLSX && uploadedXLSX) {
+      parsed = parseXLSX(uploadedXLSX);
+    } else if (uploadedText) {
+      parsed = parseCSV(uploadedText);
+    } else {
+      alert('Please upload a file first.'); return;
+    }
+    if (!parsed || parsed.length === 0) { alert('Could not parse file. Check column names or format.'); return; }
     rows = parsed;
 
   } else {
